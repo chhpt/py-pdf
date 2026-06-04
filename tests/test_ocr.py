@@ -1,15 +1,10 @@
 from __future__ import annotations
 
-from pathlib import Path
-
-import pytest
-
 from pdf_text_extractor.ocr import (
     OCRModel,
-    OCRModelError,
+    _create_engine_with_params,
     _create_rapidocr_engine,
     _extract_lines,
-    _model_params,
     _v4_model_params,
 )
 
@@ -32,21 +27,6 @@ def test_extract_lines_normalizes_rapidocr_result() -> None:
     assert lines[0].box[0] == (20.0, 30.0)
 
 
-def test_model_params_prefers_v5_server_files(tmp_path: Path) -> None:
-    for filename in [
-        "ch_PP-OCRv5_det_server.onnx",
-        "ch_PP-OCRv5_rec_server.onnx",
-        "ppocrv5_dict.txt",
-    ]:
-        (tmp_path / filename).write_text("placeholder", encoding="utf-8")
-
-    params = _model_params(tmp_path)
-
-    assert params["Det.limit_side_len"] == 960
-    assert params["Global.use_cls"] is False
-    assert params["Rec.model_path"].endswith("ch_PP-OCRv5_rec_server.onnx")
-
-
 def test_v4_model_params_use_rapidocr_bundled_files() -> None:
     params = _v4_model_params()
 
@@ -56,41 +36,29 @@ def test_v4_model_params_use_rapidocr_bundled_files() -> None:
     assert params["Rec.rec_keys_path"].endswith("ppocr_keys_v1.txt")
 
 
-def test_auto_model_falls_back_to_v4_when_v5_fails(tmp_path: Path) -> None:
-    for filename in [
-        "ch_PP-OCRv5_det_server.onnx",
-        "ch_PP-OCRv5_rec_server.onnx",
-        "ppocrv5_dict.txt",
-    ]:
-        (tmp_path / filename).write_text("placeholder", encoding="utf-8")
-
+def test_auto_model_uses_rapidocr_bundled_v4() -> None:
     calls: list[dict[str, object]] = []
 
     class FakeRapidOCR:
         def __init__(self, params: dict[str, object]) -> None:
             calls.append(params)
-            if str(params["Rec.model_path"]).endswith("ch_PP-OCRv5_rec_server.onnx"):
-                raise RuntimeError("unsupported model ir")
 
-    _create_rapidocr_engine(FakeRapidOCR, OCRModel.AUTO, tmp_path, 0.7)
+    _create_rapidocr_engine(FakeRapidOCR, OCRModel.AUTO, 0.7)
 
-    assert len(calls) == 2
-    assert calls[0]["Rec.model_path"].endswith("ch_PP-OCRv5_rec_server.onnx")
-    assert calls[1]["Rec.model_path"].endswith("ch_PP-OCRv4_rec_infer.onnx")
-    assert calls[1]["Global.text_score"] == 0.7
+    assert len(calls) == 1
+    assert calls[0]["Rec.model_path"].endswith("ch_PP-OCRv4_rec_infer.onnx")
+    assert calls[0]["Global.text_score"] == 0.7
 
 
-def test_explicit_v5_failure_mentions_centos7_hint(tmp_path: Path) -> None:
-    for filename in [
-        "ch_PP-OCRv5_det_server.onnx",
-        "ch_PP-OCRv5_rec_server.onnx",
-        "ppocrv5_dict.txt",
-    ]:
-        (tmp_path / filename).write_text("placeholder", encoding="utf-8")
+def test_engine_params_include_onnxruntime_threads() -> None:
+    calls: list[dict[str, object]] = []
 
-    class FailingRapidOCR:
+    class FakeRapidOCR:
         def __init__(self, params: dict[str, object]) -> None:
-            raise RuntimeError("unsupported model ir")
+            calls.append(params)
 
-    with pytest.raises(OCRModelError, match="CentOS 7"):
-        _create_rapidocr_engine(FailingRapidOCR, OCRModel.RAPIDOCR_V5_SERVER, tmp_path, 0.5)
+    _create_engine_with_params(FakeRapidOCR, {"Det.model_path": "det.onnx"}, 0.7, 2)
+
+    assert calls[0]["Global.text_score"] == 0.7
+    assert calls[0]["EngineConfig.onnxruntime.intra_op_num_threads"] == 2
+    assert calls[0]["EngineConfig.onnxruntime.inter_op_num_threads"] == 2

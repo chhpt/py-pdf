@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from pdf_text_extractor import cli
 from pdf_text_extractor.extractor import ExtractOptions, ExtractedPage
 from pdf_text_extractor.ocr import OCRModel
@@ -51,3 +53,50 @@ def test_cli_accepts_ocr_model(monkeypatch, tmp_path: Path) -> None:
 
     assert exit_code == 0
     assert seen_options[0].ocr_model == OCRModel.RAPIDOCR_V4_MOBILE
+
+
+def test_cli_accepts_ocr_worker_and_thread_options(monkeypatch, tmp_path: Path) -> None:
+    pdf_path = tmp_path / "input.pdf"
+    pdf_path.write_bytes(b"%PDF-test")
+    seen_options: list[ExtractOptions] = []
+
+    def fake_extract_pdf(path: Path, options: ExtractOptions) -> list[ExtractedPage]:
+        seen_options.append(options)
+        return [ExtractedPage(page_number=1, source="ocr", text="识别结果", confidence=0.9)]
+
+    monkeypatch.setattr(cli, "extract_pdf", fake_extract_pdf)
+
+    exit_code = cli.main([str(pdf_path), "--ocr-workers", "3", "--ocr-threads", "2"])
+
+    assert exit_code == 0
+    assert seen_options[0].ocr_workers == 3
+    assert seen_options[0].ocr_threads == 2
+
+
+def test_cli_reads_ocr_worker_and_thread_env(monkeypatch, tmp_path: Path) -> None:
+    pdf_path = tmp_path / "input.pdf"
+    pdf_path.write_bytes(b"%PDF-test")
+    seen_options: list[ExtractOptions] = []
+
+    def fake_extract_pdf(path: Path, options: ExtractOptions) -> list[ExtractedPage]:
+        seen_options.append(options)
+        return [ExtractedPage(page_number=1, source="ocr", text="识别结果", confidence=0.9)]
+
+    monkeypatch.setenv("PDF_EXTRACT_OCR_WORKERS", "4")
+    monkeypatch.setenv("PDF_EXTRACT_OCR_THREADS", "2")
+    monkeypatch.setattr(cli, "extract_pdf", fake_extract_pdf)
+
+    exit_code = cli.main([str(pdf_path), "--ocr-workers", "1"])
+
+    assert exit_code == 0
+    assert seen_options[0].ocr_workers == 1
+    assert seen_options[0].ocr_threads == 2
+
+
+def test_cli_rejects_invalid_ocr_workers(capsys) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["input.pdf", "--ocr-workers", "0"])
+
+    captured = capsys.readouterr()
+    assert exc_info.value.code == 2
+    assert "--ocr-workers must be greater than 0" in captured.err
