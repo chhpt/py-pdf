@@ -66,7 +66,7 @@ OCR 模型参数：
 渲染和并发参数：
 
 - `--dpi 200`：OCR 前把 PDF 页面渲染成图片的分辨率。默认 `200`；模糊扫描件或小字号可以尝试 `300`，但会显著增加 CPU、内存和耗时。
-- `--ocr-workers N`：同时 OCR 的页面 worker 数。默认使用 CPU 核心数，至少为 `1`；多页扫描 PDF 通常提高该值会更快，但也会增加内存占用。
+- `--ocr-workers N`：同时处理 OCR 页面的进程 worker 数。默认按 CPU 核心数和实际 OCR 页数自动取较小值，至少为 `1`；多页扫描 PDF 通常提高该值会更快，但也会增加内存占用。
 - `--ocr-threads N`：每个 OCR worker 内部 ONNXRuntime 使用的线程数。默认 `1`；多页并发时建议保持 `1`，避免 `ocr-workers * ocr-threads` 过大导致 CPU 线程超卖。
 
 也可以通过环境变量设置服务器默认值，CLI 参数优先级更高：

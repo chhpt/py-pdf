@@ -9,6 +9,7 @@ from pypdf import PdfWriter
 from pdf_text_extractor.extractor import (
     ExtractOptions,
     OCRMode,
+    _build_ocr_page_chunks,
     _resolve_ocr_threads,
     _resolve_ocr_workers,
     extract_pdf,
@@ -140,6 +141,9 @@ def test_multi_page_ocr_preserves_page_order(monkeypatch: pytest.MonkeyPatch, tm
         "pdf_text_extractor.extractor.render_pdf_pages",
         lambda path, page_indexes, dpi: ((page_index, page_index) for page_index in page_indexes),
     )
+    monkeypatch.setattr("pdf_text_extractor.extractor.ProcessPoolExecutor", _InlineProcessPoolExecutor)
+    monkeypatch.setattr("pdf_text_extractor.extractor._PROCESS_OCR_ENGINE", None)
+    monkeypatch.setattr("pdf_text_extractor.extractor._PROCESS_OCR_ENGINE_CONFIG", None)
 
     pages = extract_pdf(pdf_path, ExtractOptions(ocr=OCRMode.ALWAYS, ocr_workers=3))
 
@@ -199,7 +203,23 @@ def test_invalid_ocr_worker_option_raises(tmp_path: Path) -> None:
 def test_default_ocr_workers_uses_cpu_count(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("pdf_text_extractor.extractor.os.cpu_count", lambda: 8)
 
-    assert _resolve_ocr_workers(None, ocr_page_count=2) == 8
+    assert _resolve_ocr_workers(None, ocr_page_count=12) == 8
+
+
+def test_default_ocr_workers_are_capped_by_ocr_page_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("pdf_text_extractor.extractor.os.cpu_count", lambda: 8)
+
+    assert _resolve_ocr_workers(None, ocr_page_count=2) == 2
+
+
+def test_configured_ocr_workers_are_capped_by_ocr_page_count() -> None:
+    assert _resolve_ocr_workers(12, ocr_page_count=8) == 8
+
+
+def test_ocr_page_chunks_keep_workers_fed_without_too_many_tasks() -> None:
+    chunks = _build_ocr_page_chunks(list(range(10)), workers=3)
+
+    assert chunks == ((0, 1), (2, 3), (4, 5), (6, 7), (8, 9))
 
 
 def test_default_ocr_threads_uses_one(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -214,3 +234,17 @@ def _write_blank_pdf(path: Path, page_count: int = 1) -> None:
         writer.add_blank_page(width=300, height=200)
     with path.open("wb") as output:
         writer.write(output)
+
+
+class _InlineProcessPoolExecutor:
+    def __init__(self, max_workers: int) -> None:
+        self.max_workers = max_workers
+
+    def __enter__(self) -> "_InlineProcessPoolExecutor":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def map(self, function: object, tasks: object) -> object:
+        return map(function, tasks)

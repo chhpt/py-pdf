@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from concurrent.futures import Future, ThreadPoolExecutor, wait, FIRST_COMPLETED
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
+import math
 import os
 from pathlib import Path
 import re
-import threading
 
 from pypdf import PdfReader
 
@@ -36,6 +36,19 @@ class ExtractedPage:
     source: str
     text: str
     confidence: float | None = None
+
+
+@dataclass(frozen=True)
+class _OCRChunkTask:
+    path: Path
+    page_indexes: tuple[int, ...]
+    dpi: int
+    model: OCRModel
+    threads: int
+
+
+_PROCESS_OCR_ENGINE: RapidOCREngine | None = None
+_PROCESS_OCR_ENGINE_CONFIG: tuple[OCRModel, int, int] | None = None
 
 
 def extract_pdf(pdf_path: Path, options: ExtractOptions | None = None) -> list[ExtractedPage]:
@@ -146,39 +159,31 @@ def _extract_ocr_pages(
             for page_index, image in render_pdf_pages(path, page_indexes, options.dpi)
         ]
 
-    local = threading.local()
-
-    def recognize(page_index: int, image: object) -> tuple[int, ExtractedPage]:
-        engine = getattr(local, "engine", None)
-        if engine is None:
-            engine = RapidOCREngine(
-                model=options.ocr_model,
-                ocr_threads=threads,
-            )
-            local.engine = engine
-        return page_index, _page_from_ocr(page_index + 1, engine.recognize(image))
-
     results: list[tuple[int, ExtractedPage]] = []
-    pending: set[Future[tuple[int, ExtractedPage]]] = set()
-    max_pending = max(1, workers * 2)
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        for page_index, image in render_pdf_pages(path, page_indexes, options.dpi):
-            pending.add(executor.submit(recognize, page_index, image))
-            if len(pending) >= max_pending:
-                done, pending = wait(pending, return_when=FIRST_COMPLETED)
-                results.extend(future.result() for future in done)
-
-        for future in pending:
-            results.append(future.result())
+    tasks = [
+        _OCRChunkTask(
+            path=path,
+            page_indexes=chunk,
+            dpi=options.dpi,
+            model=options.ocr_model,
+            threads=threads,
+        )
+        for chunk in _build_ocr_page_chunks(page_indexes, workers)
+    ]
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        for chunk_results in executor.map(_process_ocr_page_chunk, tasks):
+            results.extend(chunk_results)
 
     return results
 
 
 def _resolve_ocr_workers(configured_workers: int | None, ocr_page_count: int) -> int:
+    if ocr_page_count <= 0:
+        return 1
     if configured_workers is not None:
-        return configured_workers
-    # Parallelize across PDF pages by default; each worker keeps OCR internals single-threaded.
-    return max(1, os.cpu_count() or 1)
+        return min(configured_workers, ocr_page_count)
+    # Parallelize across OCR pages by default, but do not create idle workers.
+    return min(max(1, os.cpu_count() or 1), ocr_page_count)
 
 
 def _resolve_ocr_threads(configured_threads: int | None) -> int:
@@ -186,3 +191,38 @@ def _resolve_ocr_threads(configured_threads: int | None) -> int:
         return configured_threads
     # Avoid CPU oversubscription when multiple page workers run at the same time.
     return 1
+
+
+def _build_ocr_page_chunks(page_indexes: list[int], workers: int) -> tuple[tuple[int, ...], ...]:
+    if not page_indexes:
+        return ()
+    if workers <= 1:
+        return (tuple(page_indexes),)
+
+    chunk_count = min(len(page_indexes), workers * 2)
+    chunk_size = max(1, math.ceil(len(page_indexes) / chunk_count))
+    return tuple(
+        tuple(page_indexes[index : index + chunk_size])
+        for index in range(0, len(page_indexes), chunk_size)
+    )
+
+
+def _process_ocr_page_chunk(task: _OCRChunkTask) -> list[tuple[int, ExtractedPage]]:
+    engine = _get_process_ocr_engine(task.model, task.threads)
+    return [
+        (page_index, _page_from_ocr(page_index + 1, engine.recognize(image)))
+        for page_index, image in render_pdf_pages(task.path, task.page_indexes, task.dpi)
+    ]
+
+
+def _get_process_ocr_engine(model: OCRModel, threads: int) -> RapidOCREngine:
+    global _PROCESS_OCR_ENGINE, _PROCESS_OCR_ENGINE_CONFIG
+
+    config = (model, threads, os.getpid())
+    if _PROCESS_OCR_ENGINE is None or _PROCESS_OCR_ENGINE_CONFIG != config:
+        _PROCESS_OCR_ENGINE = RapidOCREngine(
+            model=model,
+            ocr_threads=threads,
+        )
+        _PROCESS_OCR_ENGINE_CONFIG = config
+    return _PROCESS_OCR_ENGINE

@@ -39,30 +39,30 @@
 
 ### 3. 按页面并发 OCR
 
-需要 OCR 的页面会使用 `ThreadPoolExecutor` 并发处理。默认 `ocr-workers` 使用 CPU 核心数，也可以通过 CLI 参数或环境变量覆盖。
+需要 OCR 的页面会使用 `ProcessPoolExecutor` 并发处理。默认 `ocr-workers` 会按 CPU 核心数和实际 OCR 页数自动取较小值，也可以通过 CLI 参数或环境变量覆盖。
 
 收益：
 
-- 多页扫描 PDF 可以同时处理多页。
+- 多页扫描 PDF 可以同时渲染和 OCR 多页。
 - 单个 PDF 的等待时间通常明显下降。
 - 页面结果会按页码写回，不会因为并发完成顺序不同而打乱输出。
 
 ### 4. 每个 worker 使用独立 OCR 引擎
 
-并发 OCR 时，每个线程会通过线程本地变量持有自己的 `RapidOCREngine`，避免多个线程共享同一个 RapidOCR 实例。
+并发 OCR 时，每个进程会持有自己的 `RapidOCREngine`，避免多个 worker 共享同一个 RapidOCR 实例。
 
 收益：
 
-- 避免共享 OCR 引擎可能带来的线程安全问题。
-- 每个 worker 初始化一次后复用，减少同一线程内重复初始化成本。
+- 避免共享 OCR 引擎可能带来的并发安全问题。
+- 每个 worker 初始化一次后复用，减少同一进程内重复初始化成本。
 
-### 5. 限制 pending 任务数量
+### 5. 按页数自动拆分任务
 
-并发路径不会无限提交页面任务，而是限制 pending 任务数量为 `ocr-workers * 2`。
+并发路径不会按单页无限拆分任务，而是最多拆成约 `ocr-workers * 2` 个页面块。
 
 收益：
 
-- 避免一次性渲染太多高分辨率页面图片。
+- 避免创建太多细碎进程任务。
 - 降低多页大 PDF 的内存峰值。
 - 更适合服务器部署。
 
@@ -70,7 +70,7 @@
 
 当前默认策略：
 
-- `ocr-workers`：默认 CPU 核心数，用于页面级并发。
+- `ocr-workers`：默认按 CPU 核心数和实际 OCR 页数自动取较小值，用于页面级并发。
 - `ocr-threads`：默认 `1`，用于每个 OCR worker 内部的 ONNXRuntime 线程数。
 
 这样做的原因是多页 PDF 的主要收益来自“多页同时处理”。如果每个页面 worker 内部再开很多 ONNXRuntime 线程，实际线程数会接近：
@@ -122,7 +122,7 @@ uv run pdf-extract input.pdf -o output.txt --ocr never
 
 ## 相关实现位置
 
-- `src/pdf_text_extractor/extractor.py`：页面判定、OCR 并发、worker/thread 默认值解析。
+- `src/pdf_text_extractor/extractor.py`：页面判定、OCR 进程池并发、worker/thread 默认值解析。
 - `src/pdf_text_extractor/render.py`：批量渲染页面，避免每页重复打开 PDF。
 - `src/pdf_text_extractor/ocr.py`：将 `ocr_threads` 传给 RapidOCR / ONNXRuntime。
 - `src/pdf_text_extractor/cli.py`：CLI 参数和环境变量入口。

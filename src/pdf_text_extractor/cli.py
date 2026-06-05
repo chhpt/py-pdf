@@ -42,7 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--ocr-workers",
         type=int,
         default=None,
-        help="并行处理 OCR 页面的 worker 数；默认 CPU 核心数，可用 PDF_EXTRACT_OCR_WORKERS 覆盖。",
+        help="并行处理 OCR 页面的 worker 数；默认按 CPU 核心数和 OCR 页数自动调度，可用 PDF_EXTRACT_OCR_WORKERS 覆盖。",
     )
     parser.add_argument(
         "--ocr-threads",
